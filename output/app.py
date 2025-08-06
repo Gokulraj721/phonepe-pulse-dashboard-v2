@@ -6,38 +6,6 @@ import requests
 
 st.set_page_config(page_title="📊 PhonePe Pulse Dashboard", layout="wide")
 
-# 🚀 Fetch user metrics (optional, unused in this version)
-@st.cache_data
-def fetch_user_metrics():
-    base_url = "https://data.phonepe.com/api/data/top/user/district"
-    years = list(range(2018, 2024))
-    quarters = [1, 2, 3, 4]
-    states = [
-        "andhra-pradesh", "karnataka", "tamil-nadu", "maharashtra", "delhi",
-        "gujarat", "kerala", "west-bengal", "uttar-pradesh", "madhya-pradesh"
-    ]
-    user_rows = []
-    for state in states:
-        for year in years:
-            for quarter in quarters:
-                try:
-                    url = f"{base_url}?state={state}&year={year}&quarter={quarter}"
-                    r = requests.get(url)
-                    if r.status_code == 200:
-                        districts = r.json().get("data", {}).get("userDetails", {}).get("districts", [])
-                        for d in districts:
-                            user_rows.append({
-                                "state": state,
-                                "district": d.get("name"),
-                                "year": year,
-                                "quarter": quarter,
-                                "registeredUsers": d.get("registeredUsers", 0),
-                                "appOpens": d.get("appOpens", 0)
-                            })
-                except:
-                    continue
-    return pd.DataFrame(user_rows)
-
 # 📂 Load local CSVs
 output_dir = r"C:\Gokul Important things\Phone pay project\output"
 transaction_df = pd.read_csv(os.path.join(output_dir, "transaction_categories.csv"))
@@ -46,16 +14,59 @@ map_df = pd.read_csv(os.path.join(output_dir, "map_hover_transactions.csv"))
 # 🧼 Clean column names
 transaction_df.columns = transaction_df.columns.str.strip().str.lower()
 map_df.columns = map_df.columns.str.strip().str.lower()
+map_df.rename(columns={"district": "state"}, inplace=True)
+state_df = map_df.copy()
 
-# 🗺️ Rename for clarity
-state_df = map_df.rename(columns={"district": "state"})
+# ✅ Full state name mapping for GeoJSON compatibility
+state_name_map = {
+    "andaman & nicobar islands": "Andaman & Nicobar Island",
+    "andhra pradesh": "Andhra Pradesh",
+    "arunachal pradesh": "Arunachal Pradesh",
+    "assam": "Assam",
+    "bihar": "Bihar",
+    "chhattisgarh": "Chhattisgarh",
+    "delhi": "Delhi",
+    "goa": "Goa",
+    "gujarat": "Gujarat",
+    "haryana": "Haryana",
+    "himachal pradesh": "Himachal Pradesh",
+    "jammu & kashmir": "Jammu & Kashmir",
+    "jharkhand": "Jharkhand",
+    "karnataka": "Karnataka",
+    "kerala": "Kerala",
+    "ladakh": "Ladakh",
+    "madhya pradesh": "Madhya Pradesh",
+    "maharashtra": "Maharashtra",
+    "manipur": "Manipur",
+    "meghalaya": "Meghalaya",
+    "mizoram": "Mizoram",
+    "nagaland": "Nagaland",
+    "odisha": "Odisha",
+    "punjab": "Punjab",
+    "rajasthan": "Rajasthan",
+    "sikkim": "Sikkim",
+    "tamil nadu": "Tamil Nadu",
+    "telangana": "Telangana",
+    "tripura": "Tripura",
+    "uttar pradesh": "Uttar Pradesh",
+    "uttarakhand": "Uttarakhand",
+    "west bengal": "West Bengal",
+    "lakshadweep": "Lakshadweep"
+}
 
-# 🧭 Tabbed dashboard
+# 🔄 Shared filters
+years = sorted(state_df['year'].unique())
+states = sorted(state_df['state'].unique())
+st.sidebar.header("🔄 Global Filters")
+selected_year = st.sidebar.selectbox("📅 Select Year", years, key="global_year")
+selected_state = st.sidebar.selectbox("📍 Select State", states, key="global_state")
+
+# 🧭 Tabs
 st.title("📱 PhonePe Pulse Insights Dashboard")
 st.markdown("Explore user adoption, transaction behaviors, and regional activity across India.")
 tab1, tab2, tab3 = st.tabs(["📊 Data Highlights", "💸 Transactions", "🏞️ State-Level Insights"])
 
-# --- DATA HIGHLIGHTS TAB ---
+# --- TAB 1 ---
 with tab1:
     st.header("📊 Data Highlights & Summary")
     if transaction_df.empty:
@@ -66,105 +77,111 @@ with tab1:
 
         col1, col2 = st.columns(2)
         col1.metric("🧮 Total Transactions", f"{int(total_txn):,}")
-        col2.metric("💰 Total Volume", f"₹{total_amt/1e9:.2f}B")
+        col2.metric("💰 Total Volume", f"₹{total_amt/1e12:.2f}T")
 
-        # Top States
-        if 'state' in transaction_df.columns:
-            top_states = transaction_df.groupby('state')['count'].sum().sort_values(ascending=False).reset_index()
-            st.subheader("🏆 Top Performing States")
-            fig_state = px.bar(top_states.head(10), x='state', y='count', color='state',
-                               title="Top 10 States by Transactions", text_auto=True)
-            st.plotly_chart(fig_state, use_container_width=True)
+        category_summary = transaction_df.groupby('category')['amount'].sum().reset_index()
+        st.subheader("🍕 Category Distribution")
+        fig_pie = px.pie(category_summary, names='category', values='amount',
+                         title="Transaction Volume by Category", hole=0.3)
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-        # Category Pie
-        if 'category' in transaction_df.columns:
-            category_summary = transaction_df.groupby('category')['amount'].sum().reset_index()
-            st.subheader("🍕 Category Distribution")
-            fig_pie = px.pie(category_summary, names='category', values='amount',
-                            title="Transaction Volume by Category", hole=0.3)
-            st.plotly_chart(fig_pie, use_container_width=True)
+        year_summary = transaction_df.groupby('year')['amount'].sum().reset_index()
+        st.subheader("📈 Yearly Trends")
+        fig_year = px.line(year_summary, x='year', y='amount', markers=True,
+                           title="Year-wise Transaction Volume", labels={"amount": "₹ Volume (T)"})
+        st.plotly_chart(fig_year, use_container_width=True)
 
-        # Yearly Trends
-        if 'year' in transaction_df.columns:
-            st.subheader("📈 Yearly Trends")
-            year_summary = transaction_df.groupby('year')['amount'].sum().reset_index()
-            fig_year = px.line(year_summary, x='year', y='amount', markers=True,
-                               title="Year-wise Transaction Volume", labels={"amount": "₹ Volume"})
-            st.plotly_chart(fig_year, use_container_width=True)
-
-# --- TRANSACTIONS TAB ---
+# --- TAB 2 ---
 with tab2:
     st.header("💸 Transaction Insights")
-    if transaction_df.empty:
-        st.warning("⚠️ Transaction data not found.")
+    categories = sorted(transaction_df['category'].unique())
+    category_pick = st.selectbox("📦 Select Category", categories, key="txn_category")
+
+    selected_txns = transaction_df[
+        (transaction_df['year'] == selected_year) & 
+        (transaction_df['category'] == category_pick)
+    ]
+
+    if selected_txns.empty:
+        st.warning("⚠️ No data found for this combination.")
     else:
-        years = sorted(transaction_df['year'].unique())
-        categories = sorted(transaction_df['category'].unique())
+        total_count = selected_txns['count'].sum()
+        total_amount = selected_txns['amount'].sum()
+        st.metric("🔢 Total Transactions", f"{int(total_count):,}")
+        st.metric("💸 Total Volume", f"₹{total_amount/1e12:.2f}T")
 
-        col1, col2 = st.columns(2)
-        year_pick = col1.selectbox("📅 Select Year", years)
-        category_pick = col2.selectbox("📦 Select Category", categories)
+        fig_txn = px.bar(
+            selected_txns, x='quarter', y='amount', color='quarter',
+            title=f"{selected_year} | {category_pick} Breakdown",
+            labels={"amount": "₹ Volume (T)"}, text_auto=True
+        )
+        st.plotly_chart(fig_txn, use_container_width=True)
+        st.dataframe(selected_txns)
 
-        selected_txns = transaction_df[
-            (transaction_df['year'] == year_pick) & 
-            (transaction_df['category'] == category_pick)
-        ]
-
-        if selected_txns.empty:
-            st.warning("⚠️ No data found for this combination.")
-        else:
-            total_count = selected_txns['count'].sum()
-            total_amount = selected_txns['amount'].sum()
-            st.metric("🔢 Total Transactions", f"{int(total_count):,}")
-            st.metric("💸 Total Volume", f"₹{total_amount/1e9:.2f}B")
-
-            fig_txn = px.bar(
-                selected_txns, x='quarter', y='amount', color='quarter',
-                title=f"{year_pick} | {category_pick} Breakdown",
-                labels={"amount": "₹ Volume"}, text_auto=True
-            )
-            st.plotly_chart(fig_txn, use_container_width=True)
-            st.dataframe(selected_txns)
-
-# --- STATE TRANSACTIONS TAB ---
+# --- TAB 3 ---
 with tab3:
     st.header("🏞️ State-Level Transaction Insights")
-    if state_df.empty:
-        st.warning("⚠️ State transaction data not found.")
+    filtered_df = state_df[
+        (state_df['year'] == selected_year) & 
+        (state_df['state'] == selected_state)
+    ]
+
+    if filtered_df.empty:
+        st.warning("⚠️ No data found for this combination.")
     else:
-        years = sorted(state_df['year'].unique())
-        states = sorted(state_df['state'].unique())
+        total_amount = filtered_df['amount'].sum()
+        total_count = filtered_df['count'].sum()
 
-        col1, col2 = st.columns(2)
-        year_pick = col1.selectbox("📅 Select Year", years)
-        state_pick = col2.selectbox("📍 Select State", states)
+        st.metric("🔢 Total Transactions", f"{int(total_count):,}")
+        st.metric("💰 Total Volume", f"₹{total_amount/1e12:.2f}T")
 
-        filtered_df = state_df[
-            (state_df['year'] == year_pick) & 
-            (state_df['state'] == state_pick)
-        ]
+        fig_amount = px.bar(
+            filtered_df, x='quarter', y='amount', color='quarter',
+            title=f"{selected_state} | ₹ Amount by Quarter ({selected_year})",
+            labels={"amount": "₹ Volume (T)"}, text_auto=True
+        )
 
-        if filtered_df.empty:
-            st.warning("⚠️ No data found for this combination.")
-        else:
-            total_amount = filtered_df['amount'].sum()
-            total_count = filtered_df['count'].sum()
+        fig_count = px.line(
+            filtered_df, x='quarter', y='count', markers=True,
+            title=f"{selected_state} | Transaction Count by Quarter ({selected_year})",
+            labels={"count": "Transactions"}
+        )
 
-            st.metric("🔢 Total Transactions", f"{int(total_count):,}")
-            st.metric("💰 Total Volume", f"₹{total_amount/1e9:.2f}B")
+        st.plotly_chart(fig_amount, use_container_width=True)
+        st.plotly_chart(fig_count, use_container_width=True)
+        st.dataframe(filtered_df)
 
-            fig_amount = px.bar(
-                filtered_df, x='quarter', y='amount', color='quarter',
-                title=f"{state_pick} | ₹ Amount by Quarter ({year_pick})",
-                labels={"amount": "₹ Volume"}, text_auto=True
-            )
+        # 🌍 Choropleth Map of India with Highlight
+        st.subheader("🗺️ India Map - Transaction Volume by State")
+        map_data = state_df[state_df['year'] == selected_year].groupby('state')['amount'].sum().reset_index()
 
-            fig_count = px.line(
-                filtered_df, x='quarter', y='count', markers=True,
-                title=f"{state_pick} | Transaction Count by Quarter ({year_pick})",
-                labels={"count": "Transactions"}
-            )
+        # Normalize state names for GeoJSON compatibility
+        map_data['state'] = map_data['state'].str.lower()
+        map_data['geo_name'] = map_data['state'].map(state_name_map)
 
-            st.plotly_chart(fig_amount, use_container_width=True)
-            st.plotly_chart(fig_count, use_container_width=True)
-            st.dataframe(filtered_df)
+        # Add highlight flag
+        selected_geo_name = state_name_map.get(selected_state.lower(), "")
+        map_data['highlight'] = map_data['geo_name'].apply(lambda x: 1 if x == selected_geo_name else 0)
+
+        geojson_url = "https://gist.githubusercontent.com/jbrobst/56c13bbbf9d97d187fea01ca62ea5112/raw/e388c4cae20aa53cb5090210a42ebb9b765c0a36/india_states.geojson"
+        geojson_data = requests.get(geojson_url).json()
+
+        fig_map = px.choropleth(
+            map_data,
+            geojson=geojson_data,
+            featureidkey="properties.ST_NM",
+            locations="geo_name",
+            color="amount",
+            color_continuous_scale="YlOrBr",
+            title=f"Total Transaction Volume by State ({selected_year})",
+            labels={"amount": "₹ Volume (T)"},
+            hover_name="geo_name"
+        )
+
+        fig_map.update_traces(
+            marker_line_width=map_data["highlight"] * 5,
+            marker_line_color="crimson"
+        )
+
+        fig_map.update_geos(fitbounds="locations", visible=False)
+        st.plotly_chart(fig_map, use_container_width=True)
