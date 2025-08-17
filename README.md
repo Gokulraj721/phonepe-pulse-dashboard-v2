@@ -29,7 +29,7 @@ Code
 **1. Clone the repository**
 
 
-git clone https://github.com/Gokulraj721/phonepe-pulse-dashboard-v2/edit/main/README.md
+git clone https://github.com/Gokulraj721/phonepe-pulse-dashboard-v2
 
 2. Create a virtual environment & activate
 
@@ -55,3 +55,4 @@ Filters in the sidebar → select Year, Quarter, State
 Tabs at the top → Transactions | Users | Insurance
 
 Live charts and maps update instantly based on your filters
+
