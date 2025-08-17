@@ -1,187 +1,382 @@
-import os
-import pandas as pd
+# app.py
 import streamlit as st
+import pandas as pd
+import mysql.connector
 import plotly.express as px
-import requests
 
-st.set_page_config(page_title="📊 PhonePe Pulse Dashboard", layout="wide")
+# ---------------------- Page setup ----------------------
+st.set_page_config(page_title="PhonePe Pulse Dashboard", layout="wide")
 
-# 📂 Load local CSVs
-output_dir = r"C:\Gokul Important things\Phone pay project\output"
-transaction_df = pd.read_csv(os.path.join(output_dir, "transaction_categories.csv"))
-map_df = pd.read_csv(os.path.join(output_dir, "map_hover_transactions.csv"))
+# ---------------------- MySQL Connection ----------------------
+def get_connection():
+    return mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="12345",
+        database="phonepe_dashboard"
+    )
 
-# 🧼 Clean column names
-transaction_df.columns = transaction_df.columns.str.strip().str.lower()
-map_df.columns = map_df.columns.str.strip().str.lower()
-map_df.rename(columns={"district": "state"}, inplace=True)
-state_df = map_df.copy()
+# ---------------------- Load Data ----------------------
+@st.cache_data(show_spinner=False)
+def load_data():
+    conn = get_connection()
+    insurance_df = pd.read_sql("SELECT * FROM insurance_data", conn)
+    hover_df     = pd.read_sql("SELECT * FROM map_hover_transactions", conn)
+    category_df  = pd.read_sql("SELECT * FROM transaction_categories", conn)
+    device_df    = pd.read_sql("SELECT * FROM user_device_data", conn)
+    conn.close()
+    return insurance_df, hover_df, category_df, device_df
 
-# ✅ Full state name mapping for GeoJSON compatibility
-state_name_map = {
-    "andaman & nicobar islands": "Andaman & Nicobar Island",
-    "andhra pradesh": "Andhra Pradesh",
-    "arunachal pradesh": "Arunachal Pradesh",
-    "assam": "Assam",
-    "bihar": "Bihar",
-    "chhattisgarh": "Chhattisgarh",
-    "delhi": "Delhi",
-    "goa": "Goa",
-    "gujarat": "Gujarat",
-    "haryana": "Haryana",
-    "himachal pradesh": "Himachal Pradesh",
-    "jammu & kashmir": "Jammu & Kashmir",
-    "jharkhand": "Jharkhand",
-    "karnataka": "Karnataka",
-    "kerala": "Kerala",
-    "ladakh": "Ladakh",
-    "madhya pradesh": "Madhya Pradesh",
-    "maharashtra": "Maharashtra",
-    "manipur": "Manipur",
-    "meghalaya": "Meghalaya",
-    "mizoram": "Mizoram",
-    "nagaland": "Nagaland",
-    "odisha": "Odisha",
-    "punjab": "Punjab",
-    "rajasthan": "Rajasthan",
-    "sikkim": "Sikkim",
-    "tamil nadu": "Tamil Nadu",
-    "telangana": "Telangana",
-    "tripura": "Tripura",
-    "uttar pradesh": "Uttar Pradesh",
-    "uttarakhand": "Uttarakhand",
-    "west bengal": "West Bengal",
-    "lakshadweep": "Lakshadweep"
-}
+insurance_df, hover_df, category_df, device_df = load_data()
 
-# 🔄 Shared filters
-years = sorted(state_df['year'].unique())
-states = sorted(state_df['state'].unique())
-st.sidebar.header("🔄 Global Filters")
-selected_year = st.sidebar.selectbox("📅 Select Year", years, key="global_year")
-selected_state = st.sidebar.selectbox("📍 Select State", states, key="global_state")
+# ---------------------- Helpers: normalization & filters ----------------------
+def normalize_years(df: pd.DataFrame) -> pd.Series:
+    if "year" not in df.columns:
+        return pd.Series([], dtype=int)
+    return pd.to_numeric(df["year"], errors="coerce").dropna().astype(int)
 
-# 🧭 Tabs
-st.title("📱 PhonePe Pulse Insights Dashboard")
-st.markdown("Explore user adoption, transaction behaviors, and regional activity across India.")
-tab1, tab2, tab3 = st.tabs(["📊 Data Highlights", "💸 Transactions", "🏞️ State-Level Insights"])
+def normalize_quarters(df: pd.DataFrame) -> pd.Series:
+    if "quarter" not in df.columns:
+        return pd.Series([], dtype=object)
+    q = (
+        df["quarter"]
+        .astype(str)
+        .str.extract(r"(\d+)", expand=False)  # get just the number part
+        .astype(float)
+        .dropna()
+        .astype(int)
+        .clip(lower=1, upper=4)              # keep Q1..Q4 only
+        .apply(lambda x: f"Q{x}")
+    )
+    return q
 
-# --- TAB 1 ---
+def to_quarter_int(q_label: str) -> int | None:
+    if q_label == "All":
+        return None
+    try:
+        return int(str(q_label).replace("Q", "").strip())
+    except Exception:
+        return None
+
+def apply_year_quarter_filters(df: pd.DataFrame, year_sel, q_sel):
+    out = df.copy()
+    # Year
+    if "year" in out.columns and year_sel != "All":
+        out = out[pd.to_numeric(out["year"], errors="coerce") == int(year_sel)]
+    # Quarter
+    if "quarter" in out.columns and q_sel != "All":
+        q_num = to_quarter_int(q_sel)
+        q_col_num = (
+            out["quarter"]
+            .astype(str)
+            .str.extract(r"(\d+)", expand=False)
+            .astype(float)
+        )
+        out = out[q_col_num == float(q_num)]
+    return out
+
+# ---------------------- Build filter options ----------------------
+all_years = sorted(
+    set(normalize_years(insurance_df)) |
+    set(normalize_years(hover_df)) |
+    set(normalize_years(category_df)) |
+    set(normalize_years(device_df))
+)
+
+all_quarters_raw = list(
+    set(normalize_quarters(insurance_df)) |
+    set(normalize_quarters(hover_df)) |
+    set(normalize_quarters(category_df)) |
+    set(normalize_quarters(device_df))
+)
+# Sort quarters by numeric order Q1..Q4
+all_quarters = [q for q in ["Q1", "Q2", "Q3", "Q4"] if q in set(all_quarters_raw)]
+
+# ---------------------- Sidebar ----------------------
+st.sidebar.header("📌 Filters")
+year_options = ["All"] + all_years
+quarter_options = ["All"] + all_quarters
+
+selected_year = st.sidebar.selectbox("Select Year", year_options, index=0)
+selected_quarter = st.sidebar.selectbox("Select Quarter", quarter_options, index=0)
+
+# ---------------------- Tabs ----------------------
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🛡️ Insurance Summary",
+    "🗺️ Transaction Map",
+    "📂 Transaction Categories",
+    "📱 Device Usage",
+    "📊 Summary Insights"
+])
+
+# ---------------------- 1. Insurance Summary ----------------------
 with tab1:
-    st.header("📊 Data Highlights & Summary")
-    if transaction_df.empty:
-        st.warning("⚠️ Transaction data not found.")
+    st.subheader("🛡️ Insurance Coverage Summary")
+
+    df_ins_f = apply_year_quarter_filters(insurance_df, selected_year, selected_quarter)
+
+    if df_ins_f.empty:
+        st.warning("No insurance data available for the selected filters.")
     else:
-        total_txn = transaction_df['count'].sum()
-        total_amt = transaction_df['amount'].sum()
+        # Metrics
+        total_value = pd.to_numeric(df_ins_f.get("amount"), errors="coerce").fillna(0).sum()
+        total_policies = pd.to_numeric(df_ins_f.get("count"), errors="coerce").fillna(0).sum()
 
-        col1, col2 = st.columns(2)
-        col1.metric("🧮 Total Transactions", f"{int(total_txn):,}")
-        col2.metric("💰 Total Volume", f"₹{total_amt/1e12:.2f}T")
+        c1, c2 = st.columns(2)
+        c1.metric("💰 Total Insurance Value", f"₹{total_value:,.2f}")
+        c2.metric("🧾 Total Policies Issued", f"{int(total_policies):,}")
 
-        category_summary = transaction_df.groupby('category')['amount'].sum().reset_index()
-        st.subheader("🍕 Category Distribution")
-        fig_pie = px.pie(category_summary, names='category', values='amount',
-                         title="Transaction Volume by Category", hole=0.3)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        # Policies by type (if column exists)
+        if "type" in df_ins_f.columns:
+            policy_summary = (
+                df_ins_f.groupby("type", dropna=False, as_index=False)
+                        .agg(total_count=("count", "sum"))
+                        .sort_values("total_count", ascending=False)
+            )
+            st.subheader("📊 Policies Issued by Type")
+            st.dataframe(policy_summary, use_container_width=True)
 
-        year_summary = transaction_df.groupby('year')['amount'].sum().reset_index()
-        st.subheader("📈 Yearly Trends")
-        fig_year = px.line(year_summary, x='year', y='amount', markers=True,
-                           title="Year-wise Transaction Volume", labels={"amount": "₹ Volume (T)"})
-        st.plotly_chart(fig_year, use_container_width=True)
+            fig1 = px.pie(
+                policy_summary,
+                names="type",
+                values="total_count",
+                title=f"Policy Distribution – {selected_quarter}, {selected_year}" if selected_year != "All" or selected_quarter != "All" else "Policy Distribution – All Data",
+                hole=0.35
+            )
+            st.plotly_chart(fig1, use_container_width=True)
 
-# --- TAB 2 ---
+        # State-wise view if present
+        if "state" in df_ins_f.columns:
+            state_summary = (
+                df_ins_f.groupby("state", dropna=True, as_index=False)
+                        .agg(total_value=("amount", "sum"),
+                             total_policies=("count", "sum"))
+                        .sort_values("total_value", ascending=False)
+            )
+            st.subheader("🗺️ State-wise Insurance Value")
+            fig_state = px.bar(
+                state_summary.head(20),
+                x="state", y="total_value",
+                hover_data=["total_policies"],
+                title="Top 20 States by Insurance Value",
+                labels={"total_value": "Total Value", "state": "State"},
+                color="total_value",
+                color_continuous_scale="Blues"
+            )
+            st.plotly_chart(fig_state, use_container_width=True)
+
+# ---------------------- 2. Transaction Map ----------------------
 with tab2:
-    st.header("💸 Transaction Insights")
-    categories = sorted(transaction_df['category'].unique())
-    category_pick = st.selectbox("📦 Select Category", categories, key="txn_category")
+    st.subheader("🗺️ District‑Level Transaction Map")
 
-    selected_txns = transaction_df[
-        (transaction_df['year'] == selected_year) & 
-        (transaction_df['category'] == category_pick)
-    ]
+    df_map_f = apply_year_quarter_filters(hover_df, selected_year, selected_quarter)
 
-    if selected_txns.empty:
-        st.warning("⚠️ No data found for this combination.")
+    if df_map_f.empty:
+        st.warning("No map hover data available for the selected filters.")
     else:
-        total_count = selected_txns['count'].sum()
-        total_amount = selected_txns['amount'].sum()
-        st.metric("🔢 Total Transactions", f"{int(total_count):,}")
-        st.metric("💸 Total Volume", f"₹{total_amount/1e12:.2f}T")
+        df_map = df_map_f.copy()
+        # Ensure numeric
+        df_map["amount"] = pd.to_numeric(df_map.get("amount"), errors="coerce").fillna(0)
+        df_map["count"]  = pd.to_numeric(df_map.get("count"), errors="coerce").fillna(0)
 
-        fig_txn = px.bar(
-            selected_txns, x='quarter', y='amount', color='quarter',
-            title=f"{selected_year} | {category_pick} Breakdown",
-            labels={"amount": "₹ Volume (T)"}, text_auto=True
-        )
-        st.plotly_chart(fig_txn, use_container_width=True)
-        st.dataframe(selected_txns)
+        # Fallback location text for scatter_geo
+        if "district" in df_map.columns:
+            df_map["location"] = df_map["district"].astype(str) + ", India"
+        else:
+            df_map["location"] = "India"
 
-# --- TAB 3 ---
-with tab3:
-    st.header("🏞️ State-Level Transaction Insights")
-    filtered_df = state_df[
-        (state_df['year'] == selected_year) & 
-        (state_df['state'] == selected_state)
-    ]
-
-    if filtered_df.empty:
-        st.warning("⚠️ No data found for this combination.")
-    else:
-        total_amount = filtered_df['amount'].sum()
-        total_count = filtered_df['count'].sum()
-
-        st.metric("🔢 Total Transactions", f"{int(total_count):,}")
-        st.metric("💰 Total Volume", f"₹{total_amount/1e12:.2f}T")
-
-        fig_amount = px.bar(
-            filtered_df, x='quarter', y='amount', color='quarter',
-            title=f"{selected_state} | ₹ Amount by Quarter ({selected_year})",
-            labels={"amount": "₹ Volume (T)"}, text_auto=True
-        )
-
-        fig_count = px.line(
-            filtered_df, x='quarter', y='count', markers=True,
-            title=f"{selected_state} | Transaction Count by Quarter ({selected_year})",
-            labels={"count": "Transactions"}
-        )
-
-        st.plotly_chart(fig_amount, use_container_width=True)
-        st.plotly_chart(fig_count, use_container_width=True)
-        st.dataframe(filtered_df)
-
-        # 🌍 Choropleth Map of India with Highlight
-        st.subheader("🗺️ India Map - Transaction Volume by State")
-        map_data = state_df[state_df['year'] == selected_year].groupby('state')['amount'].sum().reset_index()
-
-        # Normalize state names for GeoJSON compatibility
-        map_data['state'] = map_data['state'].str.lower()
-        map_data['geo_name'] = map_data['state'].map(state_name_map)
-
-        # Add highlight flag
-        selected_geo_name = state_name_map.get(selected_state.lower(), "")
-        map_data['highlight'] = map_data['geo_name'].apply(lambda x: 1 if x == selected_geo_name else 0)
-
-        geojson_url = "https://gist.githubusercontent.com/jbrobst/56c13bbbf9d97d187fea01ca62ea5112/raw/e388c4cae20aa53cb5090210a42ebb9b765c0a36/india_states.geojson"
-        geojson_data = requests.get(geojson_url).json()
-
-        fig_map = px.choropleth(
-            map_data,
-            geojson=geojson_data,
-            featureidkey="properties.ST_NM",
-            locations="geo_name",
+        fig_map = px.scatter_geo(
+            df_map,
+            locations="location",
+            locationmode="country names",
             color="amount",
-            color_continuous_scale="YlOrBr",
-            title=f"Total Transaction Volume by State ({selected_year})",
-            labels={"amount": "₹ Volume (T)"},
-            hover_name="geo_name"
+            size="amount",
+            hover_name="district" if "district" in df_map.columns else None,
+            hover_data={"count": True, "amount": ":,.0f", "location": False},
+            title=(
+                f"Transactions by District – {selected_quarter}, {selected_year}"
+                if selected_year != "All" or selected_quarter != "All"
+                else "Transactions by District – All Data"
+            ),
+            projection="natural earth",
+            color_continuous_scale="Purples"
         )
-
-        fig_map.update_traces(
-            marker_line_width=map_data["highlight"] * 5,
-            marker_line_color="crimson"
+        fig_map.update_layout(
+            geo=dict(
+                scope="asia",
+                center={"lat": 22, "lon": 78},
+                projection_scale=5,
+                showland=True,
+                landcolor="#EAEAEA"
+            )
         )
-
-        fig_map.update_geos(fitbounds="locations", visible=False)
         st.plotly_chart(fig_map, use_container_width=True)
+
+# ---------------------- 3. Transaction Categories ----------------------
+with tab3:
+    st.subheader("📂 Transaction Categories")
+
+    df_cat_f = apply_year_quarter_filters(category_df, selected_year, selected_quarter)
+
+    if df_cat_f.empty:
+        st.warning("No category data available for the selected filters.")
+    else:
+        st.dataframe(df_cat_f, use_container_width=True)
+
+        # Summaries
+        df_cat_f["amount"] = pd.to_numeric(df_cat_f.get("amount"), errors="coerce").fillna(0)
+        cat_summary = (
+            df_cat_f.groupby("category", dropna=False, as_index=False)
+                    .agg(total_amount=("amount", "sum"))
+                    .sort_values("total_amount", ascending=False)
+        )
+
+        fig3 = px.bar(
+            cat_summary,
+            x="category", y="total_amount",
+            color="category",
+            title=(
+                f"Amount by Category – {selected_quarter}, {selected_year}"
+                if selected_year != "All" or selected_quarter != "All"
+                else "Amount by Category – All Data"
+            ),
+            labels={"total_amount": "Amount"}
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+# ---------------------- 4. Device Usage ----------------------
+with tab4:
+    st.subheader("📱 Device Usage")
+
+    df_dev_f = apply_year_quarter_filters(device_df, selected_year, selected_quarter)
+
+    if df_dev_f.empty:
+        st.warning("No device data available for the selected filters.")
+    else:
+        st.dataframe(df_dev_f, use_container_width=True)
+
+        df_dev_f["count"] = pd.to_numeric(df_dev_f.get("count"), errors="coerce").fillna(0)
+        brand_summary = (
+            df_dev_f.groupby("brand", dropna=False, as_index=False)
+                    .agg(total_users=("count", "sum"))
+                    .sort_values("total_users", ascending=False)
+        )
+
+        fig4 = px.pie(
+            brand_summary, names="brand", values="total_users",
+            title=(
+                f"Device Brand Distribution – {selected_quarter}, {selected_year}"
+                if selected_year != "All" or selected_quarter != "All"
+                else "Device Brand Distribution – All Data"
+            ),
+            hole=0.35
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
+# ---------------------- 5. Summary Insights ----------------------
+with tab5:
+    st.subheader("📊 Summary Insights")
+
+    # Insurance over time (All data)
+    ins = insurance_df.copy()
+    if not ins.empty:
+        ins["year"] = pd.to_numeric(ins.get("year"), errors="coerce")
+        ins["quarter"] = (
+            ins.get("quarter").astype(str).str.extract(r"(\d+)", expand=False).astype(float)
+        )
+        ins = ins.dropna(subset=["year", "quarter"])
+        ins["year"] = ins["year"].astype(int)
+        ins["quarter"] = ins["quarter"].astype(int)
+
+        ins_summary = (
+            ins.groupby(["year", "quarter"], as_index=False)
+               .agg(total_insured=("count","sum"), total_value=("amount","sum"))
+               .sort_values(["year","quarter"])
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            fig5 = px.line(
+                ins_summary, x="year", y="total_insured", color=ins_summary["quarter"].astype(str),
+                title="Total Insured Over Time", markers=True, labels={"color":"Quarter"}
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+        with c2:
+            fig5b = px.line(
+                ins_summary, x="year", y="total_value", color=ins_summary["quarter"].astype(str),
+                title="Total Insurance Value Over Time", markers=True, labels={"color":"Quarter"}
+            )
+            st.plotly_chart(fig5b, use_container_width=True)
+
+    # Transaction amount over time (All data)
+    hov = hover_df.copy()
+    if not hov.empty:
+        hov["year"] = pd.to_numeric(hov.get("year"), errors="coerce")
+        hov["quarter"] = (
+            hov.get("quarter").astype(str).str.extract(r"(\d+)", expand=False).astype(float)
+        )
+        hov["amount"] = pd.to_numeric(hov.get("amount"), errors="coerce").fillna(0)
+        hov = hov.dropna(subset=["year", "quarter"])
+        hov["year"] = hov["year"].astype(int)
+        hov["quarter"] = hov["quarter"].astype(int)
+
+        hov_summary = (
+            hov.groupby(["year", "quarter"], as_index=False)
+               .agg(total_txn_amount=("amount","sum"))
+               .sort_values(["year","quarter"])
+        )
+        fig6 = px.line(
+            hov_summary, x="year", y="total_txn_amount", color=hov_summary["quarter"].astype(str),
+            title="Total Transaction Amount Over Time", markers=True, labels={"color":"Quarter"}
+        )
+        st.plotly_chart(fig6, use_container_width=True)
+
+    # Category trends over time (All data)
+    cat = category_df.copy()
+    if not cat.empty:
+        cat["year"] = pd.to_numeric(cat.get("year"), errors="coerce")
+        cat["quarter"] = (
+            cat.get("quarter").astype(str).str.extract(r"(\d+)", expand=False).astype(float)
+        )
+        cat["amount"] = pd.to_numeric(cat.get("amount"), errors="coerce").fillna(0)
+        cat = cat.dropna(subset=["year", "quarter"])
+        cat["year"] = cat["year"].astype(int)
+        cat["quarter"] = cat["quarter"].astype(int)
+
+        cat_summary = (
+            cat.groupby(["year", "quarter"], as_index=False)
+               .agg(total_amount=("amount","sum"))
+               .sort_values(["year","quarter"])
+        )
+        fig7 = px.line(
+            cat_summary, x="year", y="total_amount", color=cat_summary["quarter"].astype(str),
+            title="Category Transaction Amount Over Time", markers=True, labels={"color":"Quarter"}
+        )
+        st.plotly_chart(fig7, use_container_width=True)
+
+    # Top 10 Districts (All data)
+    if "district" in hover_df.columns:
+        top_dist = (
+            hover_df.assign(amount=pd.to_numeric(hover_df.get("amount"), errors="coerce").fillna(0))
+                    .groupby("district", as_index=False)
+                    .agg(total_amount=("amount","sum"))
+                    .sort_values("total_amount", ascending=False)
+                    .head(10)
+        )
+        st.subheader("🏆 Top 10 Districts by Transaction Amount")
+        st.dataframe(top_dist, use_container_width=True)
+
+    # Top 10 Brands (All data)
+    if "brand" in device_df.columns:
+        top_brand = (
+            device_df.assign(count=pd.to_numeric(device_df.get("count"), errors="coerce").fillna(0))
+                     .groupby("brand", as_index=False)
+                     .agg(total_users=("count","sum"))
+                     .sort_values("total_users", ascending=False)
+                     .head(10)
+        )
+        st.subheader("📱 Top 10 Device Brands by User Count")
+        st.dataframe(top_brand, use_container_width=True)
+
+# ---------------------- Footer ----------------------
+st.markdown("---")
+st.markdown("📌 Built by Gokul | Powered by Streamlit & MySQL")
